@@ -2,51 +2,45 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Multi-feed camera system, laid out like a real drone ground station.
+/// Camera system for the mission.
 ///
-///   MAIN     large third-person view, cyclable between chase, ambulance
-///            follow, and a fixed overhead operator framing
-///   LEFT     a column of small feeds:
-///              drone   forward, rear, left, right, nadir
-///              ambulance  forward, rear
+///   MAIN     large third-person view, switchable between following the
+///            drone, following the ambulance, and a fixed overhead framing
+///   INSET 1  drone nose camera - what the aircraft sees
+///   INSET 2  ambulance third person - the vehicle being escorted
 ///
-/// Feeds are described declaratively as an offset and rotation relative to
-/// a parent transform, so adding another one is a single list entry rather
-/// than new code. Each renders to a viewport rectangle rather than a
-/// RenderTexture, which keeps the whole thing to one script with no extra
-/// assets.
+/// The insets render to RenderTextures rather than screen viewport rects.
+/// Viewport rects put every feed on its own screen-clearing camera, which
+/// made the draw order fight with the dashboard: whichever camera rendered
+/// last wiped the others. Rendering to textures and blitting them inside
+/// the HUD's own pass makes the ordering explicit and unambiguous.
 /// </summary>
 public class DroneCameraRig : MonoBehaviour
 {
     public enum MainView { ChaseDrone, FollowAmbulance, Operator, DroneNose }
 
-    private class Feed
+    public class Feed
     {
         public string Label;
         public Transform Parent;
         public Vector3 LocalOffset;
         public Vector3 LocalEuler;
+        public bool LookAtParent;
         public Camera Cam;
-        public Rect ScreenRect;
-        public bool GroupBreakBefore;
+        public RenderTexture Texture;
     }
 
     [Header("References")]
     public Transform drone;
     public Transform ambulance;
 
-    [Header("Inset column")]
+    [Header("Insets")]
     public bool showInsets = true;
-    public float insetMargin = 12f;
-    public float insetGap = 5f;
-    public float groupGap = 16f;
-    public float topBarHeight = 44f;
-    public float bottomBarHeight = 62f;
-    public float insetAspect = 16f / 9f;
-    public float maxInsetWidth = 232f;
+    public int feedTextureWidth = 512;
+    public int feedTextureHeight = 288;
 
     [Header("Main view")]
-    public Vector3 chaseOffset = new Vector3(6f, 5f, -13f);
+    public Vector3 chaseOffset = new Vector3(7f, 5f, -14f);
     public Vector3 ambulanceChaseOffset = new Vector3(5f, 4f, -11f);
     public float chaseDamping = 4.5f;
     public float operatorHeight = 170f;
@@ -55,29 +49,17 @@ public class DroneCameraRig : MonoBehaviour
     public Vector3 noseOffset = new Vector3(0f, 0.35f, 0.9f);
     public float nosePitch = 8f;
 
+    [Header("Ambulance third person")]
+    public Vector3 ambulanceFeedOffset = new Vector3(3.5f, 3f, -7f);
+
     public MainView Mode { get; private set; } = MainView.ChaseDrone;
     public Camera MainCamera { get; private set; }
 
     private readonly List<Feed> feeds = new List<Feed>();
     private float routeLength = 300f;
 
-    public IReadOnlyList<string> FeedLabels
-    {
-        get
-        {
-            List<string> l = new List<string>();
-            foreach (Feed f in feeds) l.Add(f.Label);
-            return l;
-        }
-    }
-
-    public Rect GetFeedRect(int index) =>
-        index >= 0 && index < feeds.Count ? feeds[index].ScreenRect : new Rect();
-
-    public string GetFeedLabel(int index) =>
-        index >= 0 && index < feeds.Count ? feeds[index].Label : "";
-
     public int FeedCount => feeds.Count;
+    public Feed GetFeed(int i) => i >= 0 && i < feeds.Count ? feeds[i] : null;
 
     public void Initialise(Transform droneTransform, Transform ambulanceTransform,
                            float route)
@@ -88,43 +70,38 @@ public class DroneCameraRig : MonoBehaviour
 
         MainCamera = GetComponent<Camera>();
         if (MainCamera == null) MainCamera = gameObject.AddComponent<Camera>();
-        Configure(MainCamera, 100);
+        Configure(MainCamera, 0);
         MainCamera.rect = new Rect(0f, 0f, 1f, 1f);
+        MainCamera.targetTexture = null;
 
         BuildFeeds();
     }
 
     private void BuildFeeds()
     {
-        feeds.Clear();
+        ReleaseFeeds();
 
-        // Five drone feeds. The top view is omitted deliberately: looking up
-        // at empty sky carries no mission information.
-        AddFeed("DRONE  FORWARD", drone, noseOffset, new Vector3(nosePitch, 0f, 0f));
-        AddFeed("DRONE  REAR", drone,
-                new Vector3(0f, 0.35f, -0.9f), new Vector3(nosePitch, 180f, 0f));
-        AddFeed("DRONE  PORT", drone,
-                new Vector3(-0.9f, 0.2f, 0f), new Vector3(5f, -90f, 0f));
-        AddFeed("DRONE  STARBOARD", drone,
-                new Vector3(0.9f, 0.2f, 0f), new Vector3(5f, 90f, 0f));
-        AddFeed("DRONE  NADIR", drone,
-                new Vector3(0f, -0.3f, 0f), new Vector3(90f, 0f, 0f));
+        AddFeed("DRONE  NOSE CAMERA", drone, noseOffset,
+                new Vector3(nosePitch, 0f, 0f), lookAtParent: false);
 
-        // Two ambulance feeds, visually separated from the drone group.
-        AddFeed("AMB  FORWARD", ambulance,
-                new Vector3(0f, 1.9f, 2.2f), Vector3.zero, groupBreak: true);
-        AddFeed("AMB  REAR", ambulance,
-                new Vector3(0f, 1.9f, -2.4f), new Vector3(0f, 180f, 0f));
+        AddFeed("AMBULANCE", ambulance, ambulanceFeedOffset,
+                Vector3.zero, lookAtParent: true);
     }
 
     private void AddFeed(string label, Transform parent, Vector3 offset,
-                         Vector3 euler, bool groupBreak = false)
+                         Vector3 euler, bool lookAtParent)
     {
         GameObject go = new GameObject("Feed_" + label.Replace(" ", "_"));
         go.transform.SetParent(transform, false);
 
         Camera c = go.AddComponent<Camera>();
-        Configure(c, feeds.Count + 1);
+        Configure(c, -10 + feeds.Count);   // render before the main view
+
+        RenderTexture rt = new RenderTexture(feedTextureWidth,
+                                             feedTextureHeight, 24);
+        rt.name = "RT_" + label;
+        rt.Create();
+        c.targetTexture = rt;
 
         feeds.Add(new Feed
         {
@@ -132,8 +109,9 @@ public class DroneCameraRig : MonoBehaviour
             Parent = parent,
             LocalOffset = offset,
             LocalEuler = euler,
+            LookAtParent = lookAtParent,
             Cam = c,
-            GroupBreakBefore = groupBreak
+            Texture = rt
         });
     }
 
@@ -144,6 +122,7 @@ public class DroneCameraRig : MonoBehaviour
         c.depth = depth;
         c.fieldOfView = 62f;
         c.clearFlags = CameraClearFlags.Skybox;
+        c.rect = new Rect(0f, 0f, 1f, 1f);
     }
 
     private void Update()
@@ -158,7 +137,6 @@ public class DroneCameraRig : MonoBehaviour
     private void LateUpdate()
     {
         if (drone == null) return;
-
         UpdateMainView();
         UpdateFeeds();
     }
@@ -168,11 +146,11 @@ public class DroneCameraRig : MonoBehaviour
         switch (Mode)
         {
             case MainView.ChaseDrone:
-                FollowTarget(drone, chaseOffset);
+                Follow(drone, chaseOffset);
                 break;
 
             case MainView.FollowAmbulance:
-                if (ambulance != null) FollowTarget(ambulance, ambulanceChaseOffset);
+                if (ambulance != null) Follow(ambulance, ambulanceChaseOffset);
                 break;
 
             case MainView.Operator:
@@ -184,17 +162,18 @@ public class DroneCameraRig : MonoBehaviour
 
             case MainView.DroneNose:
                 transform.position = drone.TransformPoint(noseOffset);
-                transform.rotation = drone.rotation * Quaternion.Euler(nosePitch, 0f, 0f);
+                transform.rotation = drone.rotation
+                                     * Quaternion.Euler(nosePitch, 0f, 0f);
                 break;
         }
     }
 
-    private void FollowTarget(Transform target, Vector3 offset)
+    private void Follow(Transform target, Vector3 offset)
     {
         Vector3 desired = target.TransformPoint(offset);
         transform.position = Vector3.Lerp(transform.position, desired,
                                           Time.deltaTime * chaseDamping);
-        transform.LookAt(target.position + target.forward * 5f + Vector3.up * 1f);
+        transform.LookAt(target.position + target.forward * 5f + Vector3.up);
     }
 
     private void UpdateFeeds()
@@ -207,49 +186,24 @@ public class DroneCameraRig : MonoBehaviour
             if (!f.Cam.enabled) continue;
 
             f.Cam.transform.position = f.Parent.TransformPoint(f.LocalOffset);
-            f.Cam.transform.rotation = f.Parent.rotation * Quaternion.Euler(f.LocalEuler);
-        }
 
-        if (showInsets) LayOutFeeds();
+            if (f.LookAtParent)
+                f.Cam.transform.LookAt(f.Parent.position + Vector3.up * 0.8f);
+            else
+                f.Cam.transform.rotation = f.Parent.rotation
+                                           * Quaternion.Euler(f.LocalEuler);
+        }
     }
 
-    /// <summary>
-    /// Sizes the column to whatever vertical space is left between the HUD
-    /// bars, so the feeds stay legible at any window size rather than
-    /// running off the bottom of the screen.
-    /// </summary>
-    private void LayOutFeeds()
+    private void ReleaseFeeds()
     {
-        float w = Screen.width;
-        float h = Screen.height;
-        if (w <= 0f || h <= 0f || feeds.Count == 0) return;
-
-        int breaks = 0;
-        foreach (Feed f in feeds) if (f.GroupBreakBefore) breaks++;
-
-        float available = h - topBarHeight - bottomBarHeight
-                          - insetGap * (feeds.Count - 1)
-                          - groupGap * breaks;
-
-        float feedH = Mathf.Max(48f, available / feeds.Count);
-        float feedW = Mathf.Min(maxInsetWidth, feedH * insetAspect);
-        feedH = feedW / insetAspect;
-
-        float y = topBarHeight + 12f;   // from the top of the screen
-
         foreach (Feed f in feeds)
         {
-            if (f.GroupBreakBefore) y += groupGap;
-
-            f.ScreenRect = new Rect(insetMargin, y, feedW, feedH);
-
-            // Camera.rect is normalised with the origin at the bottom left.
-            f.Cam.rect = new Rect(insetMargin / w,
-                                  (h - y - feedH) / h,
-                                  feedW / w,
-                                  feedH / h);
-
-            y += feedH + insetGap;
+            if (f.Texture != null) f.Texture.Release();
+            if (f.Cam != null) Destroy(f.Cam.gameObject);
         }
+        feeds.Clear();
     }
+
+    private void OnDestroy() { ReleaseFeeds(); }
 }

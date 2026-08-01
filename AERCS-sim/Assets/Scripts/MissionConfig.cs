@@ -43,6 +43,12 @@ public class MissionConfig
     [Header("Rendezvous")]
     [Tooltip("Separation at which the drone and ambulance count as met.")]
     public float captureRadius = 6f;
+    [Header("Return leg")]
+    [Tooltip("Time the ambulance spends at the scene loading the patient.")]
+    public float sceneDwellTime = 8f;
+    [Tooltip("How far ahead of the ambulance the drone holds while leading " +
+             "it home, clearing the corridor in front of it.")]
+    public float escortLeadDistance = 30f;
 
     /// <summary>Total time for climb, outbound dash, and descent.</summary>
     public float PredictedCorridorReadyTime =>
