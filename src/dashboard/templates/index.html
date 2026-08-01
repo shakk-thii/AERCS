@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>AERCS — Live Mission Control</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f1419;
+      color: #e6e6e6;
+    }
+
+    header {
+      padding: 14px 20px;
+      background: #161b22;
+      border-bottom: 1px solid #2d333b;
+    }
+
+    header h1 {
+      font-size: 17px;
+    }
+
+    header span {
+      font-size: 12px;
+      color: #8b949e;
+    }
+
+    .layout {
+      display: flex;
+      height: calc(100vh - 58px);
+    }
+
+    #map {
+      flex: 1;
+    }
+
+    .panel {
+      width: 300px;
+      background: #161b22;
+      border-left: 1px solid #2d333b;
+      padding: 20px;
+      overflow-y: auto;
+    }
+
+    .countdown {
+      font-size: 46px;
+      font-weight: 600;
+      color: #f0883e;
+      text-align: center;
+      margin: 10px 0 4px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .countdown-label {
+      text-align: center;
+      font-size: 11px;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 22px;
+    }
+
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      padding: 9px 0;
+      border-bottom: 1px solid #21262d;
+      font-size: 13px;
+    }
+
+    .stat span:first-child {
+      color: #8b949e;
+    }
+
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #58a6ff;
+      letter-spacing: 1px;
+      margin: 22px 0 6px;
+    }
+
+    .status {
+      padding: 11px;
+      background: #21262d;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .attribution {
+      font-size: 10px;
+      color: #6e7681;
+      margin-top: 22px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>AERCS — Autonomous Emergency Route Clearance System</h1>
+    <span>Live mission control · supervised autonomy</span>
+  </header>
+
+  <div class="layout">
+    <div id="map"></div>
+    <div class="panel">
+      <div class="countdown" id="countdown">--:--</div>
+      <div class="countdown-label">Until rendezvous</div>
+      <div class="status" id="status">Initialising...</div>
+
+      <div class="section-title">Drone</div>
+      <div class="stat"><span>Altitude</span><span id="drone-alt">--</span></div>
+      <div class="stat"><span>Speed</span><span id="drone-speed">--</span></div>
+      <div class="stat"><span>Position</span><span id="drone-pos">--</span></div>
+
+      <div class="section-title">Ambulance</div>
+      <div class="stat"><span>Position</span><span id="amb-pos">--</span></div>
+      <div class="stat"><span>To rendezvous</span><span id="amb-dist">--</span></div>
+
+      <div class="attribution">
+        Routing by OSRM. Map data © OpenStreetMap contributors, ODbL.
+        Flight control by PX4 (BSD-3).
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const map = L.map('map').setView([11.05, 76.95], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    const icon = (emoji, size) => L.divIcon({
+      html: '<div style="font-size:' + size + 'px">' + emoji + '</div>',
+      className: '', iconSize: [size, size]
+    });
+
+    let droneMarker = null, ambMarker = null, meetMarker = null;
+    let routeLine = null, linkLine = null, dronePath = null;
+    const droneTrail = [];
+
+    function fmt(s) {
+      if (s === null || s === undefined) return '--:--';
+      const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+      return m + ':' + String(sec).padStart(2, '0');
+    }
+
+    function dist(a, b) {
+      const R = 6371000, r = x => x * Math.PI / 180;
+      const dLat = r(b[0] - a[0]), dLon = r(b[1] - a[1]);
+      const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a[0])) * Math.cos(r(b[0])) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+
+    async function update() {
+      try {
+        const s = await (await fetch('/api/state')).json();
+
+        document.getElementById('status').textContent = s.message;
+        document.getElementById('countdown').textContent = fmt(s.countdown_s);
+
+        if (s.route && s.route.length && !routeLine) {
+          routeLine = L.polyline(s.route, { color: '#58a6ff', weight: 4, opacity: 0.6 }).addTo(map);
+          map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
+        }
+
+        if (s.rendezvous && !meetMarker) {
+          meetMarker = L.marker(s.rendezvous, { icon: icon('📍', 24) })
+            .addTo(map).bindPopup('Rendezvous point');
+        }
+
+        if (s.drone) {
+          const p = [s.drone.lat, s.drone.lon];
+          if (droneMarker) droneMarker.setLatLng(p);
+          else droneMarker = L.marker(p, { icon: icon('🚁', 28) }).addTo(map);
+
+          droneTrail.push(p);
+          if (dronePath) dronePath.setLatLngs(droneTrail);
+          else dronePath = L.polyline(droneTrail, { color: '#3fb950', weight: 2 }).addTo(map);
+
+          document.getElementById('drone-alt').textContent = s.drone.altitude + ' m';
+          document.getElementById('drone-speed').textContent = s.drone.speed + ' m/s';
+          document.getElementById('drone-pos').textContent =
+            s.drone.lat.toFixed(4) + ', ' + s.drone.lon.toFixed(4);
+        }
+
+        if (s.ambulance) {
+          const p = [s.ambulance.lat, s.ambulance.lon];
+          if (ambMarker) ambMarker.setLatLng(p);
+          else ambMarker = L.marker(p, { icon: icon('🚑', 28) }).addTo(map);
+
+          document.getElementById('amb-pos').textContent =
+            s.ambulance.lat.toFixed(4) + ', ' + s.ambulance.lon.toFixed(4);
+          if (s.rendezvous)
+            document.getElementById('amb-dist').textContent =
+              (dist(p, s.rendezvous) / 1000).toFixed(2) + ' km';
+        }
+
+        if (s.drone && s.ambulance) {
+          const pts = [[s.drone.lat, s.drone.lon], [s.ambulance.lat, s.ambulance.lon]];
+          if (linkLine) linkLine.setLatLngs(pts);
+          else linkLine = L.polyline(pts, { color: '#f0883e', weight: 2, dashArray: '6,8' }).addTo(map);
+        }
+      } catch (e) {
+        document.getElementById('status').textContent = 'Connection lost: ' + e.message;
+      }
+    }
+
+    setInterval(update, 500);
+    update();
+  </script>
+</body>
+
+</html>
