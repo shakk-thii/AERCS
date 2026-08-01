@@ -41,7 +41,9 @@ public class MavlinkBridge : MonoBehaviour
     private Vector3 nedPosition;
     private Vector3 nedVelocity;
     private float roll, pitch, yaw;
-    private float lastPacketTime;
+    // DateTime is thread-safe; Unity's Time API is main-thread only, and
+    // this field is written from the receive thread.
+    private System.DateTime lastPacketUtc = System.DateTime.MinValue;
 
     private UdpClient socket;
     private Thread receiveThread;
@@ -194,7 +196,7 @@ public class MavlinkBridge : MonoBehaviour
                         BitConverter.ToSingle(buf, off + 16),
                         BitConverter.ToSingle(buf, off + 20),
                         BitConverter.ToSingle(buf, off + 24));
-                    lastPacketTime = Time.realtimeSinceStartup;
+                    lastPacketUtc = System.DateTime.UtcNow;
                 }
                 packetsReceived++;
                 break;
@@ -206,7 +208,7 @@ public class MavlinkBridge : MonoBehaviour
                     roll = BitConverter.ToSingle(buf, off + 4);
                     pitch = BitConverter.ToSingle(buf, off + 8);
                     yaw = BitConverter.ToSingle(buf, off + 12);
-                    lastPacketTime = Time.realtimeSinceStartup;
+                    lastPacketUtc = System.DateTime.UtcNow;
                 }
                 packetsReceived++;
                 break;
@@ -215,12 +217,15 @@ public class MavlinkBridge : MonoBehaviour
 
     private void Update()
     {
-        float age;
-        lock (stateLock) { age = Time.realtimeSinceStartup - lastPacketTime; }
+        System.DateTime stamp;
+        lock (stateLock) { stamp = lastPacketUtc; }
 
-        lastPacketAge = age;
+        lastPacketAge = stamp == System.DateTime.MinValue
+            ? 999f
+            : (float)(System.DateTime.UtcNow - stamp).TotalSeconds;
+
         // Two seconds without a packet counts as a dead link.
-        linkUp = running && packetsReceived > 0 && age < 2f;
+        linkUp = running && packetsReceived > 0 && lastPacketAge < 2f;
     }
 
     private void OnDestroy() { StopLink(); }
