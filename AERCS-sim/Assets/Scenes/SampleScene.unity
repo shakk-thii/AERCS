@@ -480,6 +480,8 @@ MonoBehaviour:
     ambulanceMaxKmh: 35
     trafficSeed: 42
     captureRadius: 6
+    sceneDwellTime: 8
+    escortLeadDistance: 30
   flightSource: 0
   mavlinkPort: 14550
   buildCity: 1
